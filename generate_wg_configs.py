@@ -51,6 +51,7 @@ PostDown = {post_down}
 PublicKey = {client_public_key}
 PresharedKey = {preshared_key}
 AllowedIPs = {client_ip}
+PersistentKeepalive = 25
 """
 
         clients.append((i, client_private_key, preshared_key, client_ip))
@@ -82,6 +83,7 @@ PublicKey = {server_public_key}
 PresharedKey = {preshared_key}
 AllowedIPs = {allowed_ips}
 Endpoint = {server_address}:{port}
+PersistentKeepalive = 25
 """
 
         write_config(f"./configs/wg-client-{i}.conf", client_config)
