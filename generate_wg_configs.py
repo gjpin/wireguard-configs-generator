@@ -1,5 +1,5 @@
 import os
-import sys
+import argparse
 import subprocess
 
 
@@ -13,92 +13,139 @@ def generate_keypair():
     return private_key, public_key
 
 
-def generate_psk():
+def generate_preshared_key():
     return subprocess.check_output("wg genpsk", shell=True).decode().strip()
 
 
+def write_config(filepath, content):
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    with open(filepath, "w") as f:
+        f.write(content)
+
+
 def generate_server_config(
-    num_clients, network_interface, server_address, dns_server, listen_port=51820
+    num_clients, dns_server, network_interface, server_address, port, network_cidr
 ):
-    os.makedirs("configs", exist_ok=True)
     server_private_key, server_public_key = generate_keypair()
+    server_ip = network_cidr.replace("0/24", "1/24")
+
+    post_up = f"iptables -A FORWARD -i %i -j ACCEPT; iptables -t nat -A POSTROUTING -o {network_interface} -j MASQUERADE"
+    post_down = f"iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -o {network_interface} -j MASQUERADE"
+
     server_config = f"""[Interface]
-Address = 10.0.0.1/24
-ListenPort = {listen_port}
+Address = {server_ip}
+ListenPort = {port}
 PrivateKey = {server_private_key}
-PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -t nat -A POSTROUTING -o {network_interface} -j MASQUERADE
-PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -o {network_interface} -j MASQUERADE
+PostUp = {post_up}
+PostDown = {post_down}
 """
+
     clients = []
-    for i in range(2, num_clients + 2):
+    for i in range(1, num_clients + 1):
         client_private_key, client_public_key = generate_keypair()
-        psk = generate_psk()
-        clients.append((i, client_private_key, client_public_key, psk))
+        preshared_key = generate_preshared_key()
+        client_ip = network_cidr.replace("0/24", f"{i+1}/32")
+
         server_config += f"""
 [Peer]
 PublicKey = {client_public_key}
-PresharedKey = {psk}
-AllowedIPs = 10.0.0.{i}/32
+PresharedKey = {preshared_key}
+AllowedIPs = {client_ip}
 """
 
-    with open("configs/wg-server.conf", "w") as f:
-        f.write(server_config)
+        clients.append((i, client_private_key, preshared_key, client_ip))
 
-    print("Server configuration written to configs/wg-server.conf")
-    return server_public_key, clients
+    write_config("./configs/wg-server.conf", server_config)
+    return server_private_key, server_public_key, clients
 
 
-def generate_client_config(
-    client_id,
-    client_private_key,
+def generate_client_configs(
+    clients,
     server_public_key,
-    psk,
     server_address,
+    port,
     dns_server,
-    listen_port=51820,
+    full_tunnel,
+    network_cidr,
 ):
-    client_config = f"""[Interface]
-Address = 10.0.0.{client_id}/24
-ListenPort = {listen_port}
+    for i, client_private_key, preshared_key, client_ip in clients:
+        dns_config = f"DNS = {dns_server}\n" if dns_server else ""
+        allowed_ips = "0.0.0.0/0, ::/0" if full_tunnel == "full" else network_cidr
+
+        client_config = f"""[Interface]
+Address = {client_ip}
 PrivateKey = {client_private_key}
-DNS = {dns_server}
+{dns_config}
 
 [Peer]
 PublicKey = {server_public_key}
-PresharedKey = {psk}
-AllowedIPs = 10.0.0.0/24
-Endpoint = {server_address}:{listen_port}
+PresharedKey = {preshared_key}
+AllowedIPs = {allowed_ips}
+Endpoint = {server_address}:{port}
 """
-    filename = f"configs/wg-client-{client_id}.conf"
-    with open(filename, "w") as f:
-        f.write(client_config)
-    print(f"Client configuration written to {filename}")
+
+        write_config(f"./configs/wg-client-{i}.conf", client_config)
 
 
 def main():
-    if len(sys.argv) != 5:
-        print(
-            "Usage: python generate_wg_configs.py <num_clients> <network_interface> <server_address> <dns_server>"
-        )
-        sys.exit(1)
-
-    num_clients = int(sys.argv[1])
-    network_interface = sys.argv[2]
-    server_address = sys.argv[3]
-    dns_server = sys.argv[4]
-    server_public_key, clients = generate_server_config(
-        num_clients, network_interface, server_address, dns_server
+    parser = argparse.ArgumentParser(
+        description="Generate WireGuard server and client configs."
+    )
+    parser.add_argument(
+        "--num_clients",
+        type=int,
+        required=True,
+        help="Number of client configs to generate",
+    )
+    parser.add_argument(
+        "--dns_server", type=str, required=False, help="DNS server to use (optional)"
+    )
+    parser.add_argument(
+        "--network_interface",
+        type=str,
+        required=True,
+        help="Network interface for iptables",
+    )
+    parser.add_argument(
+        "--server_address", type=str, required=True, help="Server public address"
+    )
+    parser.add_argument("--port", type=int, required=True, help="WireGuard port")
+    parser.add_argument(
+        "--network_cidr",
+        type=str,
+        required=True,
+        help="Network CIDR for WireGuard (e.g., 10.0.0.0/24)",
+    )
+    parser.add_argument(
+        "--tunnel",
+        type=str,
+        choices=["full", "split"],
+        default="split",
+        help="Specify tunnel mode: 'full' for 0.0.0.0/0, ::/0 or 'split' for VPN subnet only",
     )
 
-    for client_id, client_private_key, _, psk in clients:
-        generate_client_config(
-            client_id,
-            client_private_key,
-            server_public_key,
-            psk,
-            server_address,
-            dns_server,
-        )
+    args = parser.parse_args()
+
+    server_private_key, server_public_key, clients = generate_server_config(
+        args.num_clients,
+        args.dns_server,
+        args.network_interface,
+        args.server_address,
+        args.port,
+        args.network_cidr,
+    )
+
+    generate_client_configs(
+        clients,
+        server_public_key,
+        args.server_address,
+        args.port,
+        args.dns_server,
+        args.tunnel,
+        args.network_cidr,
+    )
+
+    print("WireGuard configuration files have been generated in ./configs")
 
 
 if __name__ == "__main__":
