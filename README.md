@@ -21,11 +21,11 @@
 Example usage:
 ```bash
 python generate_wg_configs.py \
-    --network_cidr 10.0.0.0/24 \
     --num_clients 5 \
     --dns_server 10.0.0.2 \
     --network_interface enp34s0 \
     --server_address example.com \
     --port 51900 \
+    --network_cidr 10.0.0.0/24 \
     --tunnel split
 ```
